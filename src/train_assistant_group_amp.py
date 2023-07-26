@@ -831,6 +831,7 @@ def main():
     fh.setFormatter(logging.Formatter(log_format))
     logging.getLogger().addHandler(fh)
 
+
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
