@@ -1,5 +1,9 @@
 import os
 import sys
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
+import warnings
 import shutil
 import numpy as np
 import time, datetime
@@ -19,7 +23,7 @@ import pytorch_warmup as warmup
 sys.path.append("../")
 from utils.utils import *
 from utils import KD_loss
-from utils.imagenet_data_dali import imagenet_loader_dali
+#from utils.imagenet_data_dali import imagenet_loader_dali
 from timm.data import create_dataset, create_loader, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset
 from timm.data.mixup import Mixup
 from timm.data.auto_augment import rand_augment_transform
@@ -58,37 +62,20 @@ parser.add_argument('--label_smooth', type=float, default=0.1,
                     help='label smoothing')
 parser.add_argument('--teacher', type=str, default='resnext101_32x8d',
                     help='path of ImageNet')
-parser.add_argument('--teacher_num', type=int, default=1,
+parser.add_argument('--teacher_num', type=int, default=0,
                     help='number of teachers')
 parser.add_argument('--assistant_teacher_num', type=int, default=1,
                     help='number of teachers')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--dataset', type=str, default = "ImageNet",
+parser.add_argument('--dali', default=False, type=bool,
+                    help= "use dali")
+parser.add_argument('--dataset', type=str, default = "CIFAR10",
                     help='experiment dataset')
-parser.add_argument('--dali', action='store_true',
-                    help='use dali as data decoder and argumentation')
-parser.add_argument('--dali_cpu', action='store_true',
-                    help="dali mode (cpu, gpu)")
-parser.add_argument('--world-size', default=-1, type=int,
-                    help='number of nodes for distributed training')
-parser.add_argument('--rank', default=0, type=int,
-                    help='node rank for distributed training')
-parser.add_argument('--sync_bn', action='store_true',
-                        help='enabling apex sync BN.')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
-                    help='url used to set up distributed training')
-parser.add_argument('--dist-backend', default='nccl', type=str,
-                    help='distributed backend')
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
-parser.add_argument('--multiprocessing-distributed', action='store_true',
-                    help='Use multi-processing distributed training to launch '
-                         'N processes per node, which has N GPUs. This is the '
-                         'fastest way to use PyTorch for either single node or '
-                         'multi node data parallel training')
 parser.add_argument('--weak_teacher', default="ResNet101", type=str,
                     help="Define the weak teacher in multi teacher KD")
 parser.add_argument('--multi_teachers', default=True, type=bool,
@@ -221,7 +208,7 @@ def find_free_port():
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return str(s.getsockname()[1])
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(gpu, args):
     if args.dataset == "ImageNet":
         CLASSES = 1000
     elif args.dataset == "CIFAR100":
@@ -239,25 +226,11 @@ def main_worker(gpu, ngpus_per_node, args):
     args.local_rank = gpu
     print(args.distillation)
 
-    if not torch.cuda.is_available():
-        sys.exit(1)
+    # if not torch.cuda.is_available():
+    #     sys.exit(1)
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
-
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
-        #print("tcp://127.0.0.1:{}".format(find_free_port()))
-        #dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
-        print("### Finished group initialization")
 
     start_t = time.time()
 
@@ -289,7 +262,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 print("using efficient_b4 as assistant teacher")
 
         if args.assistant_teacher_num >= 4:
-            assistant_teacher.append(models.convnext_tiny(pretrained=True))
+            assistant_teachers.append(models.convnext_tiny(pretrained=True))
             print("Using convnext_tiny as assistant_teacher")
 
         if args.assistant_teacher_num > 0:
@@ -353,52 +326,24 @@ def main_worker(gpu, ngpus_per_node, args):
     logging.info(model_student)
     
     if not torch.cuda.is_available():
+        device = torch.device("cpu")
         print('using CPU, this will be slow')
-    elif args.distributed:
-        # For multiprocessing distributed, DistributedDataParallel constructor
-        # should always set the single device scope, otherwise,
-        # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            if model_teacher is not None:
-                for teacher in model_teacher:
-                    teacher.cuda(args.gpu)
-
-            model_student.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs of the current node.
-            args.batch_size = int(args.batch_size / ngpus_per_node)
-            args.workers = int((args.workers + ngpus_per_node - 1)/ ngpus_per_node)
-            if args.sync_bn:
-                model_student = nn.SyncBatchNorm.convert_sync_batchnorm(model_student)
-            model_student = torch.nn.parallel.DistributedDataParallel(model_student, device_ids=[args.gpu], find_unused_parameters=True)
-            #model_teacher = model_teacher
-        else:
-            model_student.cuda()
-            if args.teacher is not None:
-                for teacher in model_teacher:
-                    teacher.cuda()
-
-            model_teacher = model_teacher
-            if args.sync_bn:
-                model_student = nn.SyncBatchNorm.convert_sync_batchnorm(model_student)
-            model_student = torch.nn.parallel.DistributedDataParallel(model_student, find_unused_parameters=True)
 
     elif args.gpu is not None:
+        device = torch.device("cuda")
         torch.cuda.set_device(args.gpu)
         model_student = model_student.cuda(args.gpu)
         if model_teacher is not None:
             for teacher in model_teacher:
                 teacher = teacher.cuda(args.gpu)
     else:
-        print("Using DataParallel")    
+        device = torch.device("cuda")
+        print("Using DataParallel")
         model_student = torch.nn.DataParallel(model_student).cuda()
         if model_teacher is not None:
             for teacher in model_teacher:
                 teacher = torch.nn.DataParallel(teacher).cuda()
 
-    #model_student = nn.DataParallel(model_student).cuda()
 
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
     criterion = criterion.cuda(args.gpu)
@@ -457,7 +402,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if os.path.exists(checkpoint_tar):
         logging.info('loading checkpoint {} ..........'.format(checkpoint_tar))
         if args.gpu is None:
-            checkpoint = torch.load(checkpoint_tari, map_location="cpu")
+            checkpoint = torch.load(checkpoint_tar, map_location="cpu")
         else:
             # Map model to specified single gpu.
             loc = 'cuda:{}'.format(args.gpu)
@@ -492,10 +437,10 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.dataset == "ImageNet":
         
         print("Training on ImageNet")
-        
+
         if args.dali:
-            train_loader, val_loader = imagenet_loader_dali(args)
-            
+            raise NotImplementedError("dali was removed")
+
         # load training data
         else:
             from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
@@ -618,35 +563,33 @@ def main_worker(gpu, ngpus_per_node, args):
 
     #valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
 
-
     while epoch < args.epochs:
         if args.dataset == "ImageNet" and args.teacher_num > 0:
-            train_obj, train_top1_acc,  train_top5_acc, alpha = train(epoch,  train_loader, model_student, model_teacher, criterion_kd, optimizer, scheduler, temperature, args)
+            train_obj, train_top1_acc,  train_top5_acc, alpha = train(epoch,  train_loader, model_student, model_teacher, criterion_kd, optimizer, scheduler, temperature, device, args)
         else:
-            train_obj, train_top1_acc,  train_top5_acc, alpha = train(epoch,  train_loader, model_student, None, criterion, optimizer, scheduler, temperature, args)
+            train_obj, train_top1_acc,  train_top5_acc, alpha = train(epoch,  train_loader, model_student, None, criterion, optimizer, scheduler, temperature, device, args)
         
-        if not args.multiprocessing_distributed or args.local_rank == 0:
-            valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
+        print("### Validation")
+        valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, device, args)
 
-        if not args.multiprocessing_distributed or args.local_rank == 0:
-            is_best = False
-            if valid_top1_acc > best_top1_acc:
-                best_top1_acc = valid_top1_acc
-                is_best = True
+
+        is_best = False
+        if valid_top1_acc > best_top1_acc:
+            best_top1_acc = valid_top1_acc
+            is_best = True
        
-            print("Best Acc:{}%, Temp: {}".format(best_top1_acc, temperature))
+        print("Best Acc:{}%, Temp: {}".format(best_top1_acc, temperature))
         
-        if not args.multiprocessing_distributed or args.local_rank == 0:
-            training_loss.append(train_obj)
-            training_top1.append(train_top1_acc)
-            training_top5.append(train_top5_acc)
 
-            testing_loss.append(valid_obj)
-            testing_top1.append(valid_top1_acc)
-            testing_top5.append(valid_top5_acc)
-        
-        if not args.multiprocessing_distributed or args.local_rank == 0:
-            save_checkpoint({
+        training_loss.append(train_obj)
+        training_top1.append(train_top1_acc)
+        training_top5.append(train_top5_acc)
+
+        testing_loss.append(valid_obj)
+        testing_top1.append(valid_top1_acc)
+        testing_top5.append(valid_top5_acc)
+
+        save_checkpoint({
                 'epoch': epoch,
                 'train_loss': training_loss,
                 'train_top1': training_top1, 
@@ -671,12 +614,12 @@ def main_worker(gpu, ngpus_per_node, args):
             val_loader.reset()
         
     training_time = (time.time() - start_t) / 3600
-    if not args.multiprocessing_distributed or args.local_rank == 0:
-        print('total training time = {} hours'.format(training_time))
-        print("best acc: {}".format(best_top1_acc))
+
+    print('total training time = {} hours'.format(training_time))
+    print("best acc: {}".format(best_top1_acc))
 
 
-def train(epoch, train_loader, model_student, model_teacher, criterion, optimizer, scheduler, temperature, args):
+def train(epoch, train_loader, model_student, model_teacher, criterion, optimizer, scheduler, temperature, device, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     
@@ -732,17 +675,17 @@ def train(epoch, train_loader, model_student, model_teacher, criterion, optimize
              model_teacher_r = [model_teacher[0][-1]] + [model_teacher[1]]
     else:
         model_teacher_r = model_teacher
-        
+
 
     for i, batch in enumerate(train_loader):
         data_time.update(time.time() - end)
         if args.dataset == "ImageNet" and args.dali:
-            images = batch[0]['data'].cuda()
-            target = batch[0]['label'].squeeze(-1).long().cuda()
+            images = batch[0]['data'].to(device)
+            target = batch[0]['label'].squeeze(-1).long().to(device)
         
         else:
-            images = batch[0].cuda()
-            target = batch[1].cuda()
+            images = batch[0].to(device)
+            target = batch[1].to(device)
        
         if mixup is not None:
             images, target = mixup(images, target)
@@ -765,7 +708,7 @@ def train(epoch, train_loader, model_student, model_teacher, criterion, optimize
                 
            
             for item in logits_teachers:
-                alpha.append(nn.CrossEntropyLoss(reduce = (False if args.hard_knowledge_grains == "Instance" else True)).cuda()(logits_student, torch.softmax(item, dim = -1)).unsqueeze(-1))
+                alpha.append(nn.CrossEntropyLoss(reduce = (False if args.hard_knowledge_grains == "Instance" else True)).to(device)(logits_student, torch.softmax(item, dim = -1)).unsqueeze(-1))
            
             alpha = torch.softmax(torch.cat(alpha, dim = -1), dim = -1).detach()
             
@@ -775,8 +718,8 @@ def train(epoch, train_loader, model_student, model_teacher, criterion, optimize
             beta = (1 - alpha).detach()
             
             loss = []
-            for i in range(len(logits_teachers)):
-                loss.append(loss_entropy[i]*alpha[:,i])
+            for j in range(len(logits_teachers)):
+                loss.append(loss_entropy[j]*alpha[:,j])
 
             loss = torch.mean(sum(loss)/len(loss))
     
@@ -813,7 +756,8 @@ def train(epoch, train_loader, model_student, model_teacher, criterion, optimize
         optimizer.step()
         optimizer.zero_grad()
 
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -823,7 +767,7 @@ def train(epoch, train_loader, model_student, model_teacher, criterion, optimize
 
     return losses_all.avg, top1.avg, top5.avg, alpha_beta.avg
 
-def validate(epoch, val_loader, model, criterion, args):
+def validate(epoch, val_loader, model, criterion, device, args):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -841,10 +785,10 @@ def validate(epoch, val_loader, model, criterion, args):
         for i, batch in enumerate(val_loader):
             if args.dataset == "ImageNet" and args.dali:
                 images = batch[0]["data"]
-                target = batch[0]["label"].squeeze(-1).long().cuda()
+                target = batch[0]["label"].squeeze(-1).long().to(device)
             else:
-                images = batch[0].cuda()
-                target = batch[1].cuda()
+                images = batch[0].to(device)
+                target = batch[1].to(device)
 
             # compute output
             logits = model(images)
@@ -857,7 +801,8 @@ def validate(epoch, val_loader, model, criterion, args):
             top1.update(pred1[0].item(), n)
             top5.update(pred5[0].item(), n)
 
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -896,27 +841,16 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-
     ngpus_per_node = torch.cuda.device_count()
+
+    if ngpus_per_node > 0:
+        torch.cuda.set_per_process_memory_fraction(0.8)
     
     print("#### {} GPUs per Node".format(ngpus_per_node))
 
-    if args.multiprocessing_distributed:
-        print("##### Multiprocessing_distributed Training")
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
-        # Use torch.multiprocessing.spawn to launch distributed processes: the
-        # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
-    else:
-        print("##### Training")
-        # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
+    print("##### Training")
+    # Simply call main_worker function
+    main_worker(args.gpu, args)
 
 if __name__ == '__main__':
     main()
