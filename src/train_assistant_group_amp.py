@@ -848,6 +848,7 @@ def main():
     
     print("#### {} GPUs per Node".format(ngpus_per_node))
 
+
     print("##### Training")
     # Simply call main_worker function
     main_worker(args.gpu, args)
