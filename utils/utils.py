@@ -15,6 +15,7 @@ import torchvision.transforms as transforms
 import torch.backends.cudnn as cudnn
 from PIL import Image
 from torch.autograd import Variable
+from prettytable import PrettyTable
 
 from timm.data.constants import \
     IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
@@ -219,3 +220,29 @@ def torch_to_onnx_converter(torch_model, device, ckpt_path, input_shape=(1, 3, 3
     torch.onnx.export(torch_model.module, torch.randn(*input_shape).to(device), onnx_model_name, input_names=["input_1"], verbose=True)
     onnx_model = onnx.load(onnx_model_name)
     onnx.checker.check_model(onnx_model)
+
+def compute_params_ROM(model, ptq=None):
+    table = PrettyTable(["Modules", "Parameters", "Memory Footprint (KiB)"])
+    total_params = 0
+    total_memory = 0
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+
+        params = parameter.numel()
+        if "binary" in name:
+            memory = params/(8*1024)
+        elif ("conv1.weight" in name) or ("se" and "weight" in name) or ("fc.weight" in name):
+            if ptq:
+                memory = (params * ptq) / (8 * 1024)
+            else:
+                memory = (params * 32) / (8 * 1024)
+        else:
+            memory = (params * 32) / (8 * 1024)
+        table.add_row([name, params, memory])
+        total_params += params
+        total_memory += memory
+    print(table)
+    print(f"Total Trainable Params: {total_params}")
+    print(f"Total Memory Footprint (KiB): {total_memory}")
+    return total_params, total_memory
