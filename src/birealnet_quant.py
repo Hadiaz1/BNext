@@ -21,7 +21,7 @@ def conv1x1(in_planes, out_planes, stride=1):
 class firstconv3x3(nn.Module):
     def __init__(self, inp, oup, stride, quant = False):
         super(firstconv3x3, self).__init__()
-        if quant:
+        if not quant:
             self.conv1 = nn.Conv2d(inp, oup, 3, stride, 1, bias=False)
         else:
             self.conv1 = QuantizeConv(inp, oup, 3, stride, 1, 1, 1, False, activation_bits = 8, weight_bits = 8) 
