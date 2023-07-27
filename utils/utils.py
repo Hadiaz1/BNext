@@ -3,6 +3,7 @@ import sys
 import shutil
 import numpy as np
 import time, datetime
+import onnx
 import torch
 import random
 import logging
@@ -207,3 +208,14 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].contiguous().view(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+
+
+def torch_to_onnx_converter(torch_model, device, ckpt_path, input_shape=(1, 3, 32, 32)):
+    onnx_model_name = os.path.splitext(os.path.splitext(ckpt_path)[0])[0]+".onnx"
+    ckpt = torch.load(ckpt_path)
+    torch_model.eval()
+
+    torch_model.load_state_dict(ckpt["state_dict"])
+    torch.onnx.export(torch_model.module, torch.randn(*input_shape).to(device), onnx_model_name, input_names=["input_1"], verbose=True)
+    onnx_model = onnx.load(onnx_model_name)
+    onnx.checker.check_model(onnx_model)

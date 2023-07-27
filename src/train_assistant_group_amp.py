@@ -2,6 +2,7 @@ import os
 import sys
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
+import onnx
 
 import warnings
 import shutil
@@ -396,10 +397,10 @@ def main_worker(gpu, args):
     testing_top1 = []
     testing_top5 = []
   
-    checkpoint_tar = os.path.join(args.save + "_{}_optimizer_{}_mixup_{}_cutmix_{}_aug_repeats_{}_KD_{}_assistant_{}_{}_HK_{}_{}_aa_{}__elm_{}_recoup_{}_0_amp".format(args.model, args.optimizer, args.mixup, args.cutmix, args.aug_repeats, args.teacher_num, args.assistant_teacher_num, args.weak_teacher, args.hard_knowledge, args.hard_knowledge_grains, args.aa, args.elm_attention, args.infor_recoupling), 'checkpoint.pth.tar')
+    checkpoint_tar = os.path.join(args.save + "_{}_optimizer_{}_mixup_{}_cutmix_{}_aug_repeats_{}_KD_{}_assistant_{}_{}_HK_{}_{}_aa_{}__elm_{}_recoup_{}_None_amp".format(args.model, args.optimizer, args.mixup, args.cutmix, args.aug_repeats, args.teacher_num, args.assistant_teacher_num, args.weak_teacher, args.hard_knowledge, args.hard_knowledge_grains, args.aa, args.elm_attention, args.infor_recoupling), 'checkpoint.pth.tar')
     
     print(checkpoint_tar)
-    if os.path.exists(checkpoint_tar):
+    if os.path.exists(os.path.join(os.getcwd(), checkpoint_tar)):
         logging.info('loading checkpoint {} ..........'.format(checkpoint_tar))
         if args.gpu is None:
             checkpoint = torch.load(checkpoint_tar, map_location="cpu")
@@ -617,6 +618,9 @@ def main_worker(gpu, args):
 
     print('total training time = {} hours'.format(training_time))
     print("best acc: {}".format(best_top1_acc))
+
+    ckpt_path = os.path.join(os.getcwd(), checkpoint_tar.rsplit("/", 1)[0], "model_best.pth.tar")
+    torch_to_onnx_converter(torch_model=model_student, device=device, ckpt_path=ckpt_path)
 
 
 def train(epoch, train_loader, model_student, model_teacher, criterion, optimizer, scheduler, temperature, device, args):
