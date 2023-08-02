@@ -40,6 +40,7 @@ from torch.autograd import Variable
 from bnext import BNext, BasicBlock
 from birealnet import BNext18
 from birealnet_quant import birealnet18
+from BiConvNeXt import ConvNeXt
 
 parser = argparse.ArgumentParser("bnext")
 parser.add_argument('--model', type=str, default="bnext_tiny",
@@ -322,6 +323,8 @@ def main_worker(gpu, args):
         model_student = BNext18(num_classes=CLASSES)
     elif args.model == "bnext18_quant":
         model_student = birealnet18(num_classes=CLASSES, quant=8)
+    elif args.model.lower() == "biconvnext":
+        model_student = ConvNeXt(CLASSES, channel_list = [64, 128, 256, 512], num_blocks_list = [2, 2, 2, 2], kernel_size=7, patch_size=1, res_p_drop=0.)
     else:
         raise ValueError("network not defined")
 
@@ -522,7 +525,40 @@ def main_worker(gpu, args):
                 crop_pct=0.95,
                 pin_memory=args.pin_mem,
             )
-            
+
+    elif args.dataset == "person_dataset":
+        print("Training on Person / No Person dataset")
+        train_transforms = transforms.Compose([transforms.Resize(size=(128, 128), interpolation=transforms.InterpolationMode.BILINEAR),
+                                              transforms.RandomHorizontalFlip(p=0.5),
+                                              transforms.RandomVerticalFlip(p=0.5),
+                                              transforms.RandomAffine(degrees=25, translate=(0.4, 0.3), scale=(0.8, 1.2),
+                                                         shear=False),
+                                              transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                                              transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
+                                              transforms.ToTensor(),
+                                              transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])])
+
+        val_transforms = transforms.Compose([transforms.Resize(size=(128, 128), interpolation=transforms.InterpolationMode.BILINEAR),
+                                             transforms.ToTensor(),
+                                             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])])
+
+        train_dataset = datasets.ImageFolder('C:/Users/alzeinha/Image_classification/dataset/split/train', transform=train_transforms)
+        val_dataset = datasets.ImageFolder('C:/Users/alzeinha/Image_classification/dataset/split/val', transform=train_transforms)
+        train_dataset = torch.utils.data.ConcatDataset([train_dataset, val_dataset])
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=True,
+            num_workers=args.workers, pin_memory=True)
+
+
+
+        val_dataset = datasets.ImageFolder('C:/Users/alzeinha/Image_classification/dataset/split/test', transform=val_transforms)
+
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.workers, pin_memory=True)
+
+
     else:
         print("Training on CIFAR")
         normalize = transforms.Normalize(mean=[0.507, 0.487, 0.441], std = [0.267, 0.256, 0.276])
