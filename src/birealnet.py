@@ -6,7 +6,7 @@ import torch.utils.model_zoo as model_zoo
 import torch.nn.functional as F
 import numpy as np
 from einops import rearrange
-
+import math
 
 def conv3x3(in_planes, out_planes, kernel_size = 3, stride=1, groups = 1, dilation = 1):
     """3x3 convolution with padding"""
@@ -137,6 +137,27 @@ class SqueezeAndExpand(nn.Module):
         x = self.attention(x)
         return x
 
+class EfficientChannelAttention(nn.Module):
+    def __init__(self, channels, gamma=2, b=1):
+        super(EfficientChannelAttention, self).__init__()
+        self.t = int(abs((math.log(channels, 2) + b) / gamma))
+        self.k = self.t if self.t % 2 else self.t + 1
+
+        self.avg_pool = nn.AdaptiveAvgPool2d((1,1))
+        self.conv = nn.Conv1d(1, 1, kernel_size=self.k, padding=int(self.k/2), bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.avg_pool(x)
+        x = self.conv(x.squeeze(-1).transpose(-1, -2))
+        x = x.transpose(-1, -2).unsqueeze(-1)
+        x = self.sigmoid(x)
+        return x
+
+class GSoPAttention(nn.Module):
+    def __init__(self, ):
+        pass
+
 
 class Attention(nn.Module):
     expansion = 1
@@ -162,7 +183,8 @@ class Attention(nn.Module):
         if stride == 2:
             self.pooling = nn.AvgPool2d(2, 2)
 
-        self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
+        # self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
+        self.se = EfficientChannelAttention(planes)
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
     def forward(self, input):
@@ -212,7 +234,8 @@ class FFN_3x3(nn.Module):
 
         self.downsample = downsample
 
-        self.se = SqueezeAndExpand(inplanes, planes, attention_mode="sigmoid")
+        #self.se = SqueezeAndExpand(inplanes, planes, attention_mode="sigmoid")
+        self.se = EfficientChannelAttention(planes)
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
     def forward(self, input):
@@ -312,7 +335,6 @@ class BNext18(nn.Module):
         x = self.fc(x)
 
         return x
-
 
 
 

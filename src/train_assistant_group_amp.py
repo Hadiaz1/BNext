@@ -39,6 +39,7 @@ from torchvision import datasets, transforms
 from torch.autograd import Variable
 from bnext import BNext, BasicBlock
 from birealnet import BNext18
+from birealnet_quant import birealnet18
 
 parser = argparse.ArgumentParser("bnext")
 parser.add_argument('--model', type=str, default="bnext_tiny",
@@ -163,6 +164,8 @@ def adjust_temperature(model, epoch, args):
   temperature = torch.ones(1)
   if args.model == "bnext18":
       from birealnet import HardSign, HardBinaryConv
+  elif args.model == "bnext18_quant":
+      from birealnet_quant import HardSign, HardBinaryConv
   else:
       from bnext import HardSign, HardBinaryConv
 
@@ -316,7 +319,9 @@ def main_worker(gpu, args):
     #elif args.model == "bnext_super":
     #    model_student = BNext(num_classes = CLASSES, size = "super", ELM_Attention = args.elm_attention, Infor_Recoupling = args.infor_recoupling)
     elif args.model == "bnext18":
-        model_student = BNext18(num_classes = CLASSES)
+        model_student = BNext18(num_classes=CLASSES)
+    elif args.model == "bnext18_quant":
+        model_student = birealnet18(num_classes=CLASSES, quant=8)
     else:
         raise ValueError("network not defined")
 
@@ -748,10 +753,10 @@ def train(epoch, train_loader, model_student, model_teacher, criterion, optimize
         top1.update(prec1.item(), n)
         top5.update(prec5.item(), n)
         
-        if args.hard_knowledge is not False:
-            alpha_beta.update((alpha[:,0].view(-1).mean().item()), n)
-        else:
-            alpha_beta.update(alpha.mean(), n)
+        # if args.hard_knowledge is not False:
+        #     alpha_beta.update((alpha[:,0].view(-1).mean().item()), n)
+        # else:
+        #     alpha_beta.update(alpha.mean(), n)
 
         # compute gradient and do SGD step 
         loss_all.backward()
