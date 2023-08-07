@@ -79,6 +79,10 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
+parser.add_argument('--att_module', type=str, default="SE",
+                    help='Attention Module name')
+parser.add_argument('--att_in', type=str, default="pre_post",
+                    help='input to the attention Module name')
 parser.add_argument('--weak_teacher', default="ResNet101", type=str,
                     help="Define the weak teacher in multi teacher KD")
 parser.add_argument('--multi_teachers', default=True, type=bool,
@@ -320,7 +324,7 @@ def main_worker(gpu, args):
     #elif args.model == "bnext_super":
     #    model_student = BNext(num_classes = CLASSES, size = "super", ELM_Attention = args.elm_attention, Infor_Recoupling = args.infor_recoupling)
     elif args.model == "bnext18":
-        model_student = BNext18(num_classes=CLASSES)
+        model_student = BNext18(num_classes=CLASSES, att_module=args.att_module, att_in=args.att_in)
     elif args.model == "bnext18_quant":
         model_student = birealnet18(num_classes=CLASSES, quant=8)
     elif args.model.lower() == "biconvnext":

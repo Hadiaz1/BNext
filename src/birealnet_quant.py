@@ -288,15 +288,15 @@ class birealnet18(nn.Module):
 
         self.layer0 = self._make_layer(block, int(width*64), layers[0], quant = quant, se_bits = se_bits)
         self.layer1 = self._make_layer(block, int(width*128), layers[1], stride=2, quant = quant, se_bits = se_bits)
-        self.layer2 = self._make_layer(block, int(width*256), layers[2], stride=2, quant = quant, se_bits = se_bits)
-        self.layer3 = self._make_layer(block, int(width*512), layers[3], stride=2, quant = quant, se_bits = se_bits)
+        #self.layer2 = self._make_layer(block, int(width*256), layers[2], stride=2, quant = quant, se_bits = se_bits)
+        #self.layer3 = self._make_layer(block, int(width*512), layers[3], stride=2, quant = quant, se_bits = se_bits)
 
-        self.prelu = nn.PReLU(512)
+        self.prelu = nn.PReLU(128)
         self.pool1 = nn.AdaptiveAvgPool2d(1)
         if not quant:
-            self.fc = nn.Linear(512, num_classes)
+            self.fc = nn.Linear(128, num_classes)
         else:
-            self.fc = QuantizeLinear(512, num_classes, activation_bits = 8, weight_bits = 8)
+            self.fc = QuantizeLinear(128, num_classes, activation_bits = 8, weight_bits = 8)
 
     def _make_layer(self, block, planes, blocks, stride=1, quant = False, se_bits = 8):
         downsample = None
@@ -327,8 +327,8 @@ class birealnet18(nn.Module):
         
         x = self.layer0(x)
         x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
+        #x = self.layer2(x)
+        #x = self.layer3(x)
 
         x = self.prelu(x)
         x = self.pool1(x)

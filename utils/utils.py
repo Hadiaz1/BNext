@@ -213,10 +213,20 @@ def accuracy(output, target, topk=(1,)):
 
 def torch_to_onnx_converter(torch_model, device, ckpt_path, input_shape=(1, 3, 32, 32)):
     onnx_model_name = os.path.splitext(os.path.splitext(ckpt_path)[0])[0]+".onnx"
-    ckpt = torch.load(ckpt_path)
+    ckpt = torch.load(ckpt_path, map_location=device)
+    state_dict = ckpt['state_dict']
     torch_model.eval()
 
-    torch_model.load_state_dict(ckpt["state_dict"])
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[0:9] + k[16:]  # remove `module.`
+        if k[0] == 'f':
+            new_state_dict[name] = v
+        else:
+            new_state_dict[k] = v
+
+    torch_model.load_state_dict(new_state_dict)
     torch.onnx.export(torch_model.module, torch.randn(*input_shape).to(device), onnx_model_name, input_names=["input_1"], verbose=True)
     onnx_model = onnx.load(onnx_model_name)
     onnx.checker.check_model(onnx_model)

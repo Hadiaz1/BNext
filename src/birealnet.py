@@ -162,11 +162,13 @@ class GSoPAttention(nn.Module):
 class Attention(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-6, groups=1):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-6, groups=1, att_module="SE", att_in="pre_post"):
         super(Attention, self).__init__()
 
         self.inplanes = inplanes
         self.planes = planes
+        self.att_module = att_module
+        self.att_in = att_in
 
         self.move = LearnableBias(inplanes)
         self.binary_activation = HardSign(range=[-1.5, 1.5])
@@ -183,8 +185,14 @@ class Attention(nn.Module):
         if stride == 2:
             self.pooling = nn.AvgPool2d(2, 2)
 
-        # self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
-        self.se = EfficientChannelAttention(planes)
+
+        if self.att_module == "SE":
+            self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
+        elif self.att_module == "ECA":
+            self.se = EfficientChannelAttention(planes)
+        else:
+            raise ValueError("This Attention Block is not implemented")
+
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
     def forward(self, input):
@@ -202,8 +210,15 @@ class Attention(nn.Module):
         x = self.norm1(x)
         x = self.activation2(x)
 
-        mix = self.scale * residual + x * (1 - self.scale)
-        x = self.se(mix) * x
+        if self.att_in == "pre_post":
+            inp = self.scale * residual + x * (1 - self.scale)
+        elif self.att_in == "post":
+            inp = x
+        elif self.att_in == "pre":
+            inp = input
+        else:
+            raise ValueError("This Attention Block is not implemented")
+        x = self.se(inp) * x
 
         x = x * residual
         x = self.norm2(x)
@@ -213,11 +228,13 @@ class Attention(nn.Module):
 
 
 class FFN_3x3(nn.Module):
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-8, groups=1):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-8, groups=1, att_module="SE", att_in="pre_post"):
         super(FFN_3x3, self).__init__()
         self.inplanes = inplanes
         self.planes = planes
         self.stride = stride
+        self.att_module = att_module
+        self.att_in = att_in
 
         self.move = LearnableBias(inplanes)
         self.binary_activation = HardSign(range=[-1.5, 1.5])
@@ -234,8 +251,13 @@ class FFN_3x3(nn.Module):
 
         self.downsample = downsample
 
-        #self.se = SqueezeAndExpand(inplanes, planes, attention_mode="sigmoid")
-        self.se = EfficientChannelAttention(planes)
+        if self.att_module == "SE":
+            self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
+        elif self.att_module == "ECA":
+            self.se = EfficientChannelAttention(planes)
+        else:
+            raise ValueError("This Attention Block is not implemented")
+
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
     def forward(self, input):
@@ -251,8 +273,16 @@ class FFN_3x3(nn.Module):
         x = self.binary_conv(x)
         x = self.norm1(x)
         x = self.activation2(x)
-        mix = self.scale * residual + (1 - self.scale) * x
-        x = self.se(mix) * x
+
+        if self.att_in == "pre_post":
+            inp = self.scale * residual + x * (1 - self.scale)
+        elif self.att_in == "post":
+            inp = x
+        elif self.att_in == "pre":
+            inp = input
+        else:
+            raise ValueError("This Attention Block is not implemented")
+        x = self.se(inp) * x
 
         x = self.norm2(x)
         x = x + residual
@@ -262,14 +292,14 @@ class FFN_3x3(nn.Module):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate = 0.1, mode = "scale"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate = 0.1, mode = "scale", att_module="SE", att_in="pre_post"):
         super(BasicBlock, self).__init__()
         self.inplanes = inplanes
         self.planes = planes
         
-        self.Attention = Attention(inplanes, planes, stride, downsample, drop_rate = drop_rate, groups = 1)
+        self.Attention = Attention(inplanes, planes, stride, downsample, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in)
          
-        self.FFN  = FFN_3x3(planes, planes, 1, None, drop_rate = drop_rate, groups = 1)    
+        self.FFN  = FFN_3x3(planes, planes, 1, None, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in)
           
     def forward(self, input):
         x = self.Attention(input)
@@ -279,7 +309,7 @@ class BasicBlock(nn.Module):
       
 
 class BNext18(nn.Module):
-    def __init__(self, num_classes=1000, block = BasicBlock, layers = [2, 2, 2, 2]):
+    def __init__(self, num_classes=1000, block=BasicBlock, layers = [2, 2, 2, 2], att_module="ECA", att_in="pre_post"):
         super(BNext18, self).__init__()
         drop_rate = 0.2 if num_classes == 100 else 0.
         width = 1
@@ -294,16 +324,16 @@ class BNext18(nn.Module):
             self.bn1 = nn.BatchNorm2d(64)
             self.maxpool = lambda x:x
 
-        self.layer0 = self._make_layer(block, int(width*64), layers[0])
-        self.layer1 = self._make_layer(block, int(width*128), layers[1], stride=2)
-        self.layer2 = self._make_layer(block, int(width*256), layers[2], stride=2)
-        self.layer3 = self._make_layer(block, int(width*512), layers[3], stride=2)
+        self.layer0 = self._make_layer(block, int(width*64), layers[0], att_module=att_module, att_in=att_in)
+        self.layer1 = self._make_layer(block, int(width*128), layers[1], stride=2, att_module=att_module, att_in=att_in)
+        self.layer2 = self._make_layer(block, int(width*256), layers[2], stride=2, att_module=att_module, att_in=att_in)
+        self.layer3 = self._make_layer(block, int(width*512), layers[3], stride=2, att_module=att_module, att_in=att_in)
 
         self.prelu = nn.PReLU(512)
         self.pool1 = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(512, num_classes)
 
-    def _make_layer(self, block, planes, blocks, stride=1):
+    def _make_layer(self, block, planes, blocks, stride=1, att_module="ECA", att_in="pre_post"):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -312,10 +342,10 @@ class BNext18(nn.Module):
                                 nn.BatchNorm2d(planes * block.expansion))
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, drop_rate = 0))
+        layers.append(block(self.inplanes, planes, stride, downsample, drop_rate = 0, att_module=att_module, att_in=att_in))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes, drop_rate = 0))
+            layers.append(block(self.inplanes, planes, drop_rate = 0, att_module=att_module, att_in=att_in))
 
         return nn.Sequential(*layers)
 
