@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import numpy as np
 from einops import rearrange
 import math
+from layer_utils import *
 
 def conv3x3(in_planes, out_planes, kernel_size = 3, stride=1, groups = 1, dilation = 1):
     """3x3 convolution with padding"""
@@ -112,7 +113,6 @@ class HardBinaryConv(nn.Module):
 
         return y
 
-
 class SqueezeAndExpand(nn.Module):
     def __init__(self, channels, planes, ratio=8, attention_mode="hard_sigmoid"):
         super(SqueezeAndExpand, self).__init__()
@@ -154,9 +154,43 @@ class EfficientChannelAttention(nn.Module):
         x = self.sigmoid(x)
         return x
 
+
 class GSoPAttention(nn.Module):
-    def __init__(self, ):
-        pass
+    def __init__(self, channels, att_dim=128):
+        super(GSoPAttention, self).__init__()
+        if channels > 64:
+            DR_stride = 1
+        else:
+            DR_stride = 2
+
+        self.dimDR = att_dim
+        self.conv1 = nn.Conv2d(channels, self.dimDR, kernel_size=1, stride=DR_stride, bias=False)
+        self.bn1 = nn.BatchNorm2d(self.dimDR)
+        self.relu1 = nn.ReLU()
+
+        self.row_bn = nn.BatchNorm2d(self.dimDR)
+        self.row_conv = nn.Conv2d(self.dimDR, 4*self.dimDR, kernel_size=(self.dimDR, 1), groups=self.dimDR, bias=False)
+        self.fc = nn.Conv2d(4*self.dimDR, channels, kernel_size=1, groups=1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+
+        x = CovpoolLayer(x)
+        x = x.view(x.size(0), x.size(1), x.size(2), 1).contiguous()
+        x = self.row_bn(x)
+
+        x = self.row_conv(x)
+
+        x = self.fc(x)
+        x = self.sigmoid(x)
+
+        return x
+
+
+
 
 
 class Attention(nn.Module):
@@ -190,6 +224,8 @@ class Attention(nn.Module):
             self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
         elif self.att_module == "ECA":
             self.se = EfficientChannelAttention(planes)
+        elif self.att_module.lower() == "GSoP".lower():
+            self.se = GSoPAttention(planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 
@@ -215,7 +251,7 @@ class Attention(nn.Module):
         elif self.att_in == "post":
             inp = x
         elif self.att_in == "pre":
-            inp = input
+            inp = residual
         else:
             raise ValueError("This Attention Block is not implemented")
         x = self.se(inp) * x
@@ -255,6 +291,8 @@ class FFN_3x3(nn.Module):
             self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
         elif self.att_module == "ECA":
             self.se = EfficientChannelAttention(planes)
+        elif self.att_module.lower() == "GSoP".lower():
+            self.se = GSoPAttention(planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 

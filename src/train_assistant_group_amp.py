@@ -408,9 +408,13 @@ def main_worker(gpu, args):
     testing_loss = []
     testing_top1 = []
     testing_top5 = []
-  
-    checkpoint_tar = os.path.join(args.save + "_{}_optimizer_{}_mixup_{}_cutmix_{}_aug_repeats_{}_KD_{}_assistant_{}_{}_HK_{}_{}_aa_{}__elm_{}_recoup_{}_None_amp".format(args.model, args.optimizer, args.mixup, args.cutmix, args.aug_repeats, args.teacher_num, args.assistant_teacher_num, args.weak_teacher, args.hard_knowledge, args.hard_knowledge_grains, args.aa, args.elm_attention, args.infor_recoupling), 'checkpoint.pth.tar')
-    
+
+    checkpoint_tar = os.path.join(
+        args.save + "_{}_optimizer_{}_mixup_{}_cutmix_{}_aug_repeats_{}_KD_{}_assistant_{}_{}_HK_{}_{}_aa_{}__elm_{}_recoup_{}_None_amp_attention_{}_{}".format(
+            args.model, args.optimizer, args.mixup, args.cutmix, args.aug_repeats, args.teacher_num,
+            args.assistant_teacher_num, args.weak_teacher, args.hard_knowledge, args.hard_knowledge_grains, args.aa,
+            args.elm_attention, args.infor_recoupling, args.att_module, args.att_in), 'checkpoint.pth.tar')
+
     print(checkpoint_tar)
     if os.path.exists(os.path.join(os.getcwd(), checkpoint_tar)):
         logging.info('loading checkpoint {} ..........'.format(checkpoint_tar))
@@ -638,7 +642,7 @@ def main_worker(gpu, args):
         save_checkpoint({
                 'epoch': epoch,
                 'train_loss': training_loss,
-                'train_top1': training_top1, 
+                'train_top1': training_top1,
                 'train_top5': training_top5,
                 'test_loss': testing_loss,
                 'test_top1': testing_top1,
@@ -648,8 +652,7 @@ def main_worker(gpu, args):
                 'optimizer' : optimizer.state_dict(),
                 'temp': training_temperature,
                 'alpha': alpha,
-                }, is_best, args.save + "_" + "{}_optimizer_{}_mixup_{}_cutmix_{}_aug_repeats_{}_KD_{}_assistant_{}_{}_HK_{}_{}_aa_{}__elm_{}_recoup_{}_{}_amp".format(args.model, args.optimizer, args.mixup, args.cutmix, args.aug_repeats, args.teacher_num, args.assistant_teacher_num, args.weak_teacher, args.hard_knowledge, args.hard_knowledge_grains, args.aa, args.elm_attention, args.infor_recoupling, args.gpu, args.epochs), epoch = epoch)
-
+                }, is_best, args.save + "_" + "{}_optimizer_{}_mixup_{}_cutmix_{}_aug_repeats_{}_KD_{}_assistant_{}_{}_HK_{}_{}_aa_{}__elm_{}_recoup_{}_{}_amp_attention_{}_{}".format(args.model, args.optimizer, args.mixup, args.cutmix, args.aug_repeats, args.teacher_num, args.assistant_teacher_num, args.weak_teacher, args.hard_knowledge, args.hard_knowledge_grains, args.aa, args.elm_attention, args.infor_recoupling, args.att_module, args.att_in, args.gpu, args.epochs), epoch = epoch)
         epoch += 1
         
         temperature = adjust_temperature(model_student, epoch, args).item()
