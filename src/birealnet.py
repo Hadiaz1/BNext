@@ -154,6 +154,33 @@ class EfficientChannelAttention(nn.Module):
         x = self.sigmoid(x)
         return x
 
+class SelfAttention(nn.Module):
+    def __init__(self, channels):
+        super(SelfAttention, self).__init__()
+        self.chanel_in = channels
+
+        self.query = nn.Conv2d(in_channels=channels,
+                             out_channels=channels, kernel_size=1)
+        self.key = nn.Conv2d(in_channels=channels,
+                           out_channels=channels, kernel_size=1)
+        self.value = nn.Conv2d(in_channels=channels,
+                             out_channels=channels, kernel_size=1)
+
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        m_batchsize, C, height, width = x.size()
+        proj_query = self.query(x).reshape(
+            m_batchsize, -1, width*height).transpose(1, 2)
+        proj_key = self.key(x).reshape(m_batchsize, -1, width*height)
+        energy = torch.bmm(proj_query, proj_key)
+        attention = self.softmax(energy)
+        proj_value = self.value(x).reshape(m_batchsize, -1, width*height)
+
+        out = torch.bmm(proj_value, attention.transpose(1, 2))
+        out = out.reshape(m_batchsize, C, height, width)
+
+        return out
 
 class GSoPAttention(nn.Module):
     def __init__(self, channels, att_dim=128):
@@ -226,6 +253,8 @@ class Attention(nn.Module):
             self.se = EfficientChannelAttention(planes)
         elif self.att_module.lower() == "GSoP".lower():
             self.se = GSoPAttention(planes)
+        elif self.att_module.lower() == "SA".lower():
+            self.se = SelfAttention(planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 
@@ -254,7 +283,11 @@ class Attention(nn.Module):
             inp = residual
         else:
             raise ValueError("This Attention Block is not implemented")
-        x = self.se(inp) * x
+
+        if self.att_module == "SA":
+            x = self.se(inp)
+        else:
+            x = self.se(inp) * x
 
         x = x * residual
         x = self.norm2(x)
@@ -293,6 +326,8 @@ class FFN_3x3(nn.Module):
             self.se = EfficientChannelAttention(planes)
         elif self.att_module.lower() == "GSoP".lower():
             self.se = GSoPAttention(planes)
+        elif self.att_module.lower() == "SA".lower():
+            self.se = SelfAttention(planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 
@@ -317,10 +352,14 @@ class FFN_3x3(nn.Module):
         elif self.att_in == "post":
             inp = x
         elif self.att_in == "pre":
-            inp = input
+            inp = residual
         else:
             raise ValueError("This Attention Block is not implemented")
-        x = self.se(inp) * x
+
+        if self.att_module == "SA":
+            x = self.se(inp)
+        else:
+            x = self.se(inp) * x
 
         x = self.norm2(x)
         x = x + residual
