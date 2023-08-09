@@ -8,6 +8,7 @@ import numpy as np
 from einops import rearrange
 import math
 from layer_utils import *
+from bam import *
 
 def conv3x3(in_planes, out_planes, kernel_size = 3, stride=1, groups = 1, dilation = 1):
     """3x3 convolution with padding"""
@@ -216,6 +217,16 @@ class GSoPAttention(nn.Module):
 
         return x
 
+class BAM(nn.Module):
+    def __init__(self, channels):
+        super(BAM, self).__init__()
+        self.channel_att = ChannelGate(channels)
+        self.spatial_att = SpatialGate(channels)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self,x):
+        x = 1 + self.sigmoid(self.channel_att(x) * self.spatial_att(x))
+        return x
 
 
 
@@ -255,6 +266,8 @@ class Attention(nn.Module):
             self.se = GSoPAttention(planes)
         elif self.att_module.lower() == "SA".lower():
             self.se = SelfAttention(planes)
+        elif self.att_module.lower() == "BAM".lower():
+            self.se = BAM(planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 
@@ -286,6 +299,10 @@ class Attention(nn.Module):
 
         if self.att_module == "SA":
             x = self.se(inp)
+        elif self.att_module.lower() == "BAM".lower():
+            res = inp
+            x = self.se(inp) * inp
+            x = res + x
         else:
             x = self.se(inp) * x
 
@@ -328,6 +345,8 @@ class FFN_3x3(nn.Module):
             self.se = GSoPAttention(planes)
         elif self.att_module.lower() == "SA".lower():
             self.se = SelfAttention(planes)
+        elif self.att_module.lower() == "BAM".lower():
+            self.se = BAM(planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 
@@ -358,6 +377,10 @@ class FFN_3x3(nn.Module):
 
         if self.att_module == "SA":
             x = self.se(inp)
+        elif self.att_module.lower() == "BAM".lower():
+            res = inp
+            x = self.se(inp) * inp
+            x = res + x
         else:
             x = self.se(inp) * x
 
