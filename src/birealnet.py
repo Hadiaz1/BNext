@@ -8,7 +8,8 @@ import numpy as np
 from einops import rearrange
 import math
 from layer_utils import *
-from bam import *
+import bam
+import cbam
 
 def conv3x3(in_planes, out_planes, kernel_size = 3, stride=1, groups = 1, dilation = 1):
     """3x3 convolution with padding"""
@@ -220,21 +221,80 @@ class GSoPAttention(nn.Module):
 class BAM(nn.Module):
     def __init__(self, channels):
         super(BAM, self).__init__()
-        self.channel_att = ChannelGate(channels)
-        self.spatial_att = SpatialGate(channels)
+        self.channel_att = bam.ChannelGate(channels)
+        self.spatial_att = bam.SpatialGate(channels)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self,x):
         x = 1 + self.sigmoid(self.channel_att(x) * self.spatial_att(x))
         return x
 
+class CBAM(nn.Module):
+    def __init__(self, gate_channels, reduction_ratio=8, pool_types=['avg', 'max']):
+        super(CBAM, self).__init__()
+        self.ChannelGate = cbam.ChannelGate(gate_channels, reduction_ratio, pool_types)
+        self.SpatialGate = cbam.SpatialGate()
+
+    def forward(self, x):
+        x = self.ChannelGate(x)
+        x = self.SpatialGate(x)
+        return x
 
 
+class CGDAttentionLayer(nn.Module):
+    def __init__(self, in_channels, out_channels, bias=True, nonlinear=True):
+        super(CGDAttentionLayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.softmax = nn.Softmax(dim=1)
+
+        self.w0 = nn.Parameter(torch.ones(in_channels, 1), requires_grad=True)
+        self.w1 = nn.Parameter(torch.ones(in_channels, 1), requires_grad=True)
+        self.w2 = nn.Parameter(torch.ones(in_channels, 1), requires_grad=True)
+
+        self.bias0 = nn.Parameter(torch.zeros(1, in_channels, 1, 1), requires_grad=True)
+        self.bias1 = nn.Parameter(torch.zeros(1, in_channels, 1, 1), requires_grad=True)
+        self.bias2 = nn.Parameter(torch.zeros(1, in_channels, 1, 1), requires_grad=True)
+
+        nn.init.xavier_uniform_(self.w0)
+        nn.init.xavier_uniform_(self.w1)
+        nn.init.xavier_uniform_(self.w2)
+
+        # self.tanh = nn.Tanh()
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        x0 = self.avg_pool(x).view(b, c, 1, 1)
+        x1 = self.max_pool(x).view(b, c, 1, 1)
+
+        x0_s = self.softmax(x0)  # b ,c ,1 ,1
+
+        y0 = torch.matmul(x0.view(b, c), self.w0).view(b, 1, 1, 1)
+        y1 = torch.matmul(x1.view(b, c), self.w1).view(b, 1, 1, 1)
+
+        y0_s = torch.tanh(y0 * x0_s + self.bias0)  # b ,c ,1 ,1
+        y1_s = torch.tanh(y1 * x0_s + self.bias1)  # b ,c ,1 ,1
+
+        y2 = torch.matmul(y1_s.view(b, c), self.w2).view(b, 1, 1, 1)
+        y2_s = torch.tanh(y2 * y0_s + self.bias2).view(b, c, 1, 1)
+
+        z = x * (y2_s + 1)
+
+        return z
+
+class CGD(nn.Module):
+    def __init__(self, in_channels, spatial_size):
+        super(CGD, self).__init__()
+        self.att_layer = CGDAttentionLayer(spatial_size, spatial_size)
+
+    def forward(self, x):
+        x = self.att_layer(x)
+        return x
 
 class Attention(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-6, groups=1, att_module="SE", att_in="pre_post"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-6, groups=1, att_module="SE", att_in="pre_post", activation="prelu"):
         super(Attention, self).__init__()
 
         self.inplanes = inplanes
@@ -249,8 +309,12 @@ class Attention(nn.Module):
         self.norm1 = nn.BatchNorm2d(planes)
         self.norm2 = nn.BatchNorm2d(planes)
 
-        self.activation1 = nn.PReLU(inplanes)
-        self.activation2 = nn.PReLU(planes)
+        if activation == "prelu":
+            self.activation1 = nn.PReLU(inplanes)
+            self.activation2 = nn.PReLU(planes)
+        elif activation == "gelu":
+            self.activation1 = nn.GELU()
+            self.activation2 = nn.GELU()
 
         self.downsample = downsample
         self.stride = stride
@@ -268,6 +332,10 @@ class Attention(nn.Module):
             self.se = SelfAttention(planes)
         elif self.att_module.lower() == "BAM".lower():
             self.se = BAM(planes)
+        elif self.att_module.lower() == "CBAM".lower():
+            self.se = CBAM(planes)
+        elif self.att_module.lower() == "CGD".lower():
+            self.se = CGD(planes, planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 
@@ -297,7 +365,7 @@ class Attention(nn.Module):
         else:
             raise ValueError("This Attention Block is not implemented")
 
-        if self.att_module == "SA":
+        if self.att_module == "SA" or self.att_module == "CBAM" or self.att_module == "CGD":
             x = self.se(inp)
         elif self.att_module.lower() == "BAM".lower():
             res = inp
@@ -314,7 +382,7 @@ class Attention(nn.Module):
 
 
 class FFN_3x3(nn.Module):
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-8, groups=1, att_module="SE", att_in="pre_post"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-8, groups=1, att_module="SE", att_in="pre_post", activation="prelu"):
         super(FFN_3x3, self).__init__()
         self.inplanes = inplanes
         self.planes = planes
@@ -329,8 +397,12 @@ class FFN_3x3(nn.Module):
         self.norm1 = nn.BatchNorm2d(planes)
         self.norm2 = nn.BatchNorm2d(planes)
 
-        self.activation1 = nn.PReLU(inplanes)
-        self.activation2 = nn.PReLU(planes)
+        if activation == "prelu":
+            self.activation1 = nn.PReLU(inplanes)
+            self.activation2 = nn.PReLU(planes)
+        elif activation == "gelu":
+            self.activation1 = nn.GELU()
+            self.activation2 = nn.GELU()
 
         if stride == 2:
             self.pooling = nn.AvgPool2d(2, 2)
@@ -347,6 +419,10 @@ class FFN_3x3(nn.Module):
             self.se = SelfAttention(planes)
         elif self.att_module.lower() == "BAM".lower():
             self.se = BAM(planes)
+        elif self.att_module.lower() == "CBAM".lower():
+            self.se = CBAM(planes)
+        elif self.att_module.lower() == "CGD".lower():
+            self.se = CGD(planes, planes)
         else:
             raise ValueError("This Attention Block is not implemented")
 
@@ -375,7 +451,7 @@ class FFN_3x3(nn.Module):
         else:
             raise ValueError("This Attention Block is not implemented")
 
-        if self.att_module == "SA":
+        if self.att_module == "SA" or self.att_module == "CBAM" or self.att_module == "CGD":
             x = self.se(inp)
         elif self.att_module.lower() == "BAM".lower():
             res = inp
@@ -392,14 +468,14 @@ class FFN_3x3(nn.Module):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate = 0.1, mode = "scale", att_module="SE", att_in="pre_post"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate = 0.1, mode = "scale", att_module="SE", att_in="pre_post", activation="prelu"):
         super(BasicBlock, self).__init__()
         self.inplanes = inplanes
         self.planes = planes
         
-        self.Attention = Attention(inplanes, planes, stride, downsample, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in)
+        self.Attention = Attention(inplanes, planes, stride, downsample, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in, activation=activation)
          
-        self.FFN  = FFN_3x3(planes, planes, 1, None, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in)
+        self.FFN  = FFN_3x3(planes, planes, 1, None, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in, activation=activation)
           
     def forward(self, input):
         x = self.Attention(input)
@@ -409,7 +485,7 @@ class BasicBlock(nn.Module):
       
 
 class BNext18(nn.Module):
-    def __init__(self, num_classes=1000, block=BasicBlock, layers = [2, 2, 2, 2], att_module="ECA", att_in="pre_post"):
+    def __init__(self, num_classes=1000, block=BasicBlock, layers = [2, 2, 2, 2], att_module="ECA", att_in="pre_post", activation="prelu"):
         super(BNext18, self).__init__()
         drop_rate = 0.2 if num_classes == 100 else 0.
         width = 1
@@ -424,16 +500,19 @@ class BNext18(nn.Module):
             self.bn1 = nn.BatchNorm2d(64)
             self.maxpool = lambda x:x
 
-        self.layer0 = self._make_layer(block, int(width*64), layers[0], att_module=att_module, att_in=att_in)
-        self.layer1 = self._make_layer(block, int(width*128), layers[1], stride=2, att_module=att_module, att_in=att_in)
-        self.layer2 = self._make_layer(block, int(width*256), layers[2], stride=2, att_module=att_module, att_in=att_in)
-        self.layer3 = self._make_layer(block, int(width*512), layers[3], stride=2, att_module=att_module, att_in=att_in)
+        self.layer0 = self._make_layer(block, int(width*64), layers[0], att_module=att_module, att_in=att_in, activation=activation)
+        self.layer1 = self._make_layer(block, int(width*128), layers[1], stride=2, att_module=att_module, att_in=att_in, activation=activation)
+        self.layer2 = self._make_layer(block, int(width*256), layers[2], stride=2, att_module=att_module, att_in=att_in, activation=activation)
+        self.layer3 = self._make_layer(block, int(width*512), layers[3], stride=2, att_module=att_module, att_in=att_in, activation=activation)
 
-        self.prelu = nn.PReLU(512)
+        if activation == "prelu":
+            self.prelu = nn.PReLU(512)
+        elif activation == "gelu":
+            self.prelu = nn.GELU()
         self.pool1 = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(512, num_classes)
 
-    def _make_layer(self, block, planes, blocks, stride=1, att_module="ECA", att_in="pre_post"):
+    def _make_layer(self, block, planes, blocks, stride=1, att_module="ECA", att_in="pre_post", activation="prelu"):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -442,10 +521,10 @@ class BNext18(nn.Module):
                                 nn.BatchNorm2d(planes * block.expansion))
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, drop_rate = 0, att_module=att_module, att_in=att_in))
+        layers.append(block(self.inplanes, planes, stride, downsample, drop_rate = 0, att_module=att_module, att_in=att_in, activation=activation))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes, drop_rate = 0, att_module=att_module, att_in=att_in))
+            layers.append(block(self.inplanes, planes, drop_rate = 0, att_module=att_module, att_in=att_in, activation=activation))
 
         return nn.Sequential(*layers)
 
