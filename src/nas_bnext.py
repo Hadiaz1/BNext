@@ -19,7 +19,7 @@ import logging
 
 from torchvision import datasets, transforms
 
-from utils.utils import AverageMeter, ProgressMeter, accuracy
+from utils.utils import AverageMeter, ProgressMeter, accuracy, compute_params_ROM_MACs
 
 import yaml
 
@@ -213,22 +213,7 @@ class Attention(nn.Module):
             self.pooling = nn.AvgPool2d(2, 2)
 
 
-        if self.att_module == "SE":
-            self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
-        elif self.att_module == "ECA":
-            self.se = EfficientChannelAttention(planes)
-        elif self.att_module.lower() == "GSoP".lower():
-            self.se = GSoPAttention(planes)
-        elif self.att_module.lower() == "SA".lower():
-            self.se = SelfAttention(planes)
-        elif self.att_module.lower() == "BAM".lower():
-            self.se = BAM(planes)
-        elif self.att_module.lower() == "CBAM".lower():
-            self.se = CBAM(planes)
-        elif self.att_module.lower() == "CGD".lower():
-            self.se = CGD(planes, planes)
-        else:
-            raise ValueError("This Attention Block is not implemented")
+        self.se = att_module
 
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
@@ -256,14 +241,7 @@ class Attention(nn.Module):
         else:
             raise ValueError("This Attention Block is not implemented")
 
-        if self.att_module == "SA" or self.att_module == "CBAM" or self.att_module == "CGD":
-            x = self.se(inp)
-        elif self.att_module.lower() == "BAM".lower():
-            res = inp
-            x = self.se(inp) * inp
-            x = res + x
-        else:
-            x = self.se(inp) * x
+        x = self.se(inp) * x
 
         x = x * residual
         x = self.norm2(x)
@@ -299,22 +277,7 @@ class FFN_3x3(nn.Module):
 
         self.downsample = downsample
 
-        if self.att_module == "SE":
-            self.se = SqueezeAndExpand(planes, planes, attention_mode="sigmoid")
-        elif self.att_module == "ECA":
-            self.se = EfficientChannelAttention(planes)
-        elif self.att_module.lower() == "GSoP".lower():
-            self.se = GSoPAttention(planes)
-        elif self.att_module.lower() == "SA".lower():
-            self.se = SelfAttention(planes)
-        elif self.att_module.lower() == "BAM".lower():
-            self.se = BAM(planes)
-        elif self.att_module.lower() == "CBAM".lower():
-            self.se = CBAM(planes)
-        elif self.att_module.lower() == "CGD".lower():
-            self.se = CGD(planes, planes)
-        else:
-            raise ValueError("This Attention Block is not implemented")
+        self.se = att_module
 
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
@@ -341,15 +304,9 @@ class FFN_3x3(nn.Module):
         else:
             raise ValueError("This Attention Block is not implemented")
 
-        if self.att_module == "SA" or self.att_module == "CBAM" or self.att_module == "CGD":
-            x = self.se(inp)
-        elif self.att_module.lower() == "BAM".lower():
-            res = inp
-            x = self.se(inp) * inp
-            x = res + x
-        else:
-            x = self.se(inp) * x
+        x = self.se(inp) * x
 
+        x = x * residual
         x = self.norm2(x)
         x = x + residual
 
@@ -377,35 +334,40 @@ class BasicBlock(nn.Module):
 
 @model_wrapper
 class ModelSpace(nn.Module):
-    def __init__(self, num_classes=10, block=BasicBlock, layers = [2, 2, 2, 2], activation="prelu"):
+    def __init__(self, num_classes=10, block=BasicBlock, n_layers = 3, activation="prelu"):
         super().__init__()
-        self.dropout1 = nn.Dropout(nn.ValueChoice([0.1, 0.2, 0.3]))
         width = 1
-        self.inplanes = 64
+        self.num_layers = n_layers
+        self.num_blocks_per_layer = [2] * self.num_layers
+        self.inplanes = nn.ModelParameterChoice([16, 32, 64], label="inplanes")
 
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(self.inplanes)
         self.maxpool = lambda x:x
 
-        width_multiplier = [64, 128, 256, 512]
+        width_base_multiplier = self.inplanes
+        width_multiplier = [width_base_multiplier*(2**i) for i in range(self.num_layers)]
 
-        self.att_0 = nn.ModelParameterChoice(["SE", "ECA"])
-        self.att_in_0 = nn.ModelParameterChoice(["pre", "post", "pre_post"])
+        self.layers = torch.nn.ModuleList()
+        self.atts = []
 
-        self.layer0 = self._make_layer(block, int(width*width_multiplier[0]), layers[0], att_module=self.att_0, att_in=self.att_in_0, activation=activation)
-        
-        self.layer1 = self._make_layer(block, int(width*width_multiplier[1]), layers[1], stride=2, activation=activation)
-        self.layer2 = self._make_layer(block, int(width*width_multiplier[2]), layers[2], stride=2, activation=activation)
-        self.layer3 = self._make_layer(block, int(width*width_multiplier[3]), layers[3], stride=2, activation=activation)
-
+        for i in range(self.num_layers):
+            if i == 0:
+                self.layers.append(self._make_layer(block, int(width*width_multiplier[i]), self.num_blocks_per_layer[i], att_module=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid"),
+                EfficientChannelAttention(int(width*width_multiplier[i]))], label=f"att_{i}"), att_in=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_{i}"), activation=activation))
+            else:
+                self.layers.append(self._make_layer(block, int(width*width_multiplier[i]), self.num_blocks_per_layer[i], stride=2, att_module=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid"),
+                EfficientChannelAttention(int(width*width_multiplier[i]))], label=f"att_{i}"), att_in=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_{i}"), activation=activation))
+    
         if activation == "prelu":
-            self.prelu = nn.PReLU(512)
+            self.prelu = nn.PReLU(width_multiplier[-1])
         elif activation == "gelu":
             self.prelu = nn.GELU()
         self.pool1 = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(512, num_classes)
+        self.fc = nn.Linear(width_multiplier[-1], num_classes)
+    
 
-    def _make_layer(self, block, planes, blocks, stride=1, att_module="SE", att_in="pre_post", activation="prelu"):
+    def _make_layer(self, block, planes, blocks, stride=1, att_module=None, att_in="pre_post", activation="prelu"):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -426,10 +388,8 @@ class ModelSpace(nn.Module):
         x = self.bn1(x)
         x = self.maxpool(x)
         
-        x = self.layer0(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
+        for i in range(self.num_layers):
+            x = self.layers[i].cuda()(x)
 
         x = self.prelu(x)
         x = self.pool1(x)
@@ -588,6 +548,8 @@ def evaluate_model(model_cls):
     temperature = 1.0
     training_temperature.append(temperature)
 
+    params, footprint, macs = compute_params_ROM_MACs(model)
+
     for epoch in range(CONFIG["epochs"]):
         # train the model for one epoch
         train_epoch(model, device, train_loader, criterion, scheduler, optimizer, epoch)
@@ -596,11 +558,11 @@ def evaluate_model(model_cls):
         temperature = adjust_temperature(model, epoch).item()
         training_temperature.append(temperature)
         # call report intermediate result. Result can be float or dict
-        nni.report_intermediate_result(accuracy)
+        nni.report_intermediate_result({"accuracy": accuracy})
 
 
     # report final test result
-    nni.report_final_result(accuracy)
+    nni.report_final_result({"default": accuracy, "memory footprint kib": footprint, "MACs": macs, "number of params": params})
 
 
 
@@ -608,6 +570,8 @@ if __name__== "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, default="run",
                     help='NAS mode: "run" or "resume" or "view". "resume" and "view" require the experiment ID.')
+    parser.add_argument('--num_layers', type=int, default=2,
+                    help='Number of Layers for all the candidate models to search for')
     parser.add_argument('--experiment_name', type=str, default="CIFAR10_search",
                     help='Name assigned to the experiment')
     parser.add_argument('--strategy', type=str, default="random",
@@ -620,7 +584,7 @@ if __name__== "__main__":
                     help='Experiment ID of the experiment to be resumed ir viewed. Will be automatically set when running a new experiment for first time')
     
     args = parser.parse_args()
-    model_space = ModelSpace()
+    model_space = ModelSpace(n_layers=args.num_layers)
 
     evaluator = FunctionalEvaluator(evaluate_model)
 

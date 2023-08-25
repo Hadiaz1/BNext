@@ -21,6 +21,8 @@ from timm.data.constants import \
     IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
 from timm.data import create_transform
 
+from ptflops import get_model_complexity_info
+
 def build_transform(is_train, args):
     """
     RandArgument and Rand Erase
@@ -231,10 +233,12 @@ def torch_to_onnx_converter(torch_model, device, ckpt_path, input_shape=(1, 3, 3
     onnx_model = onnx.load(onnx_model_name)
     onnx.checker.check_model(onnx_model)
 
-def compute_params_ROM(model, ptq=None):
+def compute_params_ROM_MACs(model, ptq=None):
     table = PrettyTable(["Modules", "Parameters", "Memory Footprint (KiB)"])
     total_params = 0
     total_memory = 0
+    macs, _ = get_model_complexity_info(model, (3, 32, 32), as_strings=False,
+                                           print_per_layer_stat=True, verbose=True)
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
@@ -255,4 +259,5 @@ def compute_params_ROM(model, ptq=None):
     print(table)
     print(f"Total Trainable Params: {total_params}")
     print(f"Total Memory Footprint (KiB): {total_memory}")
-    return total_params, total_memory
+    print(f"Total MACs: {macs}")
+    return total_params, total_memory, macs
