@@ -1,7 +1,5 @@
 adjustText==0.7.3
 anykeystore==0.2
-apex==0.9.10
-charset-normalizer==2.1.1
 cmake==3.25.0
 contourpy==1.0.6
 cryptacular==1.6.2
