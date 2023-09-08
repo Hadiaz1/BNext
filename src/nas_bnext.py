@@ -242,7 +242,7 @@ class EfficientChannelAttention(nn.Module):
         return x
 
 class GSoPAttention(nn.Module):
-    def __init__(self, channels, att_dim=16):
+    def __init__(self, channels, att_dim=16, quant=True, bits=8):
         super(GSoPAttention, self).__init__()
         if channels > 64:
             DR_stride = 1
@@ -250,17 +250,23 @@ class GSoPAttention(nn.Module):
             DR_stride = 2
 
         self.dimDR = att_dim
-        self.conv1 = nn.Conv2d(channels, self.dimDR, kernel_size=1, stride=DR_stride, bias=False)
+
+        if not quant:
+            self.gsop_conv = nn.Conv2d(channels, self.dimDR, kernel_size=1, stride=DR_stride, bias=False)
+            self.gsop_fc = nn.Conv2d(4*self.dimDR, channels, kernel_size=1, groups=1, bias=False)
+        
+        else:
+            self.gsop_conv = QuantizeConv(channels, self.dimDR, 1, DR_stride, 0, 1, 1, False, activation_bits=bits, weight_bits=bits)
+            self.gsop_fc = QuantizeConv(4*self.dimDR, channels, 1, 1, 0, 1, 1, False, activation_bits=bits, weight_bits=bits)
+        
+        self.row_conv = nn.Conv2d(self.dimDR, 4*self.dimDR, kernel_size=(self.dimDR, 1), groups=self.dimDR, bias=False)
         self.bn1 = nn.BatchNorm2d(self.dimDR)
         self.relu1 = nn.ReLU()
-
         self.row_bn = nn.BatchNorm2d(self.dimDR)
-        self.row_conv = nn.Conv2d(self.dimDR, 4*self.dimDR, kernel_size=(self.dimDR, 1), groups=self.dimDR, bias=False)
-        self.fc = nn.Conv2d(4*self.dimDR, channels, kernel_size=1, groups=1, bias=False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        x = self.conv1(x)
+        x = self.gsop_conv(x)
         x = self.bn1(x)
         x = self.relu1(x)
 
@@ -270,7 +276,7 @@ class GSoPAttention(nn.Module):
 
         x = self.row_conv(x)
 
-        x = self.fc(x)
+        x = self.gsop_fc(x)
         x = self.sigmoid(x)
 
         return x
@@ -618,7 +624,7 @@ def evaluate_model(model_cls):
             lr=CONFIG["learning_rate"])
 
 
-    scheduler = CosineLRScheduler(optimizer, t_initial=10, warmup_t=5, lr_min = 1e-7, warmup_lr_init=1e-5, warmup_prefix = True)
+    scheduler = CosineLRScheduler(optimizer, t_initial=CONFIG["epochs"], warmup_t=5, lr_min = 1e-7, warmup_lr_init=1e-5, warmup_prefix = True)
     
     normalize = transforms.Normalize(mean=[0.507, 0.487, 0.441], std = [0.267, 0.256, 0.276])
         
@@ -668,7 +674,7 @@ def evaluate_model(model_cls):
         temperature = adjust_temperature(model, epoch).item()
         training_temperature.append(temperature)
         print("Best Acc: {}%, Temp: {}".format(best_top1_acc, temperature))
-        
+
         # call report intermediate result. Result can be float or dict
         nni.report_intermediate_result({"accuracy": accuracy})
 
