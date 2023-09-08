@@ -1,9 +1,14 @@
+from layer_utils import CovpoolLayer
+from utils_quant import *
+
 import torch
 import torch.nn.functional as F
 import nni
 import nni.retiarii.nn.pytorch as nn
 import math
 from nni.retiarii import model_wrapper
+
+
 
 from nni.retiarii.experiment.pytorch import RetiariiExperiment, RetiariiExeConfig
 from nni.retiarii.evaluator import FunctionalEvaluator
@@ -35,6 +40,26 @@ def adjust_temperature(model, epoch):
                 module.temperature.mul_(0.9)
             temperature = module.temperature
     return temperature
+
+
+class firstconv3x3(nn.Module):
+    def __init__(self, inp, oup, stride, quant = True):
+        super(firstconv3x3, self).__init__()
+        if not quant:
+            self.conv1 = nn.Conv2d(inp, oup, 3, stride, 1, bias=False)
+        else:
+            self.conv1 = QuantizeConv(inp, oup, 3, stride, 1, 1, 1, False, activation_bits = 8, weight_bits = 8) 
+
+        self.bn1 = nn.BatchNorm2d(oup)
+        self.prelu = nn.PReLU(oup, oup)
+
+    def forward(self, x):
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.prelu(out)
+
+        return out
 
 
 def conv3x3(in_planes, out_planes, kernel_size = 3, stride=1, groups = 1, dilation = 1):
@@ -141,15 +166,49 @@ class HardBinaryConv(nn.Module):
 
         return y
 
+# class SqueezeAndExpand(nn.Module):
+#     def __init__(self, channels, planes, ratio=8, attention_mode="hard_sigmoid"):
+#         super(SqueezeAndExpand, self).__init__()
+#         self.se = nn.Sequential(
+#             nn.AdaptiveAvgPool2d((1, 1)),
+#             nn.Conv2d(channels, channels // ratio, kernel_size=1, padding=0),
+#             nn.ReLU(channels // ratio),
+#             nn.Conv2d(channels // ratio, planes, kernel_size=1, padding=0),
+#         )
+
+#         if attention_mode == "sigmoid":
+#             self.attention = nn.Sigmoid()
+
+#         elif attention_mode == "hard_sigmoid":
+#             self.attention = HardSigmoid()
+
+#         else:
+#             self.attention = nn.Softmax(dim=1)
+
+#     def forward(self, x):
+#         x = self.se(x)
+#         x = self.attention(x)
+#         return x
+
 class SqueezeAndExpand(nn.Module):
-    def __init__(self, channels, planes, ratio=8, attention_mode="hard_sigmoid"):
+    def __init__(self, channels, planes, ratio=8, attention_mode="hard_sigmoid", quant = True, bits = 8):
         super(SqueezeAndExpand, self).__init__()
-        self.se = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Conv2d(channels, channels // ratio, kernel_size=1, padding=0),
-            nn.ReLU(channels // ratio),
-            nn.Conv2d(channels // ratio, planes, kernel_size=1, padding=0),
-        )
+        if not quant:
+            self.se = nn.Sequential(
+                nn.AdaptiveAvgPool2d((1,1)),
+                nn.Conv2d(channels, channels // ratio, kernel_size=1, padding=0),
+                nn.ReLU(),
+                nn.Conv2d(channels // ratio, planes, kernel_size=1, padding=0),
+            )
+
+        else:
+            self.se = nn.Sequential(
+                nn.AdaptiveAvgPool2d((1, 1)),
+                QuantizeConv(channels, channels // ratio, 1, 1, 0, 1, 1, True, activation_bits=bits, weight_bits=bits),
+                nn.ReLU(),
+                QuantizeConv(channels // ratio, channels, 1, 1, 0, 1, 1, True, activation_bits=bits, weight_bits=bits)
+
+            )
 
         if attention_mode == "sigmoid":
             self.attention = nn.Sigmoid()
@@ -182,16 +241,50 @@ class EfficientChannelAttention(nn.Module):
         x = self.sigmoid(x)
         return x
 
+class GSoPAttention(nn.Module):
+    def __init__(self, channels, att_dim=16):
+        super(GSoPAttention, self).__init__()
+        if channels > 64:
+            DR_stride = 1
+        else:
+            DR_stride = 2
+
+        self.dimDR = att_dim
+        self.conv1 = nn.Conv2d(channels, self.dimDR, kernel_size=1, stride=DR_stride, bias=False)
+        self.bn1 = nn.BatchNorm2d(self.dimDR)
+        self.relu1 = nn.ReLU()
+
+        self.row_bn = nn.BatchNorm2d(self.dimDR)
+        self.row_conv = nn.Conv2d(self.dimDR, 4*self.dimDR, kernel_size=(self.dimDR, 1), groups=self.dimDR, bias=False)
+        self.fc = nn.Conv2d(4*self.dimDR, channels, kernel_size=1, groups=1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+
+        x = CovpoolLayer(x)
+        x = x.view(x.size(0), x.size(1), x.size(2), 1).contiguous()
+        x = self.row_bn(x)
+
+        x = self.row_conv(x)
+
+        x = self.fc(x)
+        x = self.sigmoid(x)
+
+        return x
+
 class Attention(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-6, groups=1, att_module="SE", att_in="pre_post", activation="prelu"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-6, groups=1, att_module_elm="SE", att_in_elm="pre_post", activation="prelu"):
         super(Attention, self).__init__()
 
         self.inplanes = inplanes
         self.planes = planes
-        self.att_module = att_module
-        self.att_in = att_in
+        self.att_module = att_module_elm
+        self.att_in = att_in_elm
 
         self.move = LearnableBias(inplanes)
         self.binary_activation = HardSign(range=[-1.5, 1.5])
@@ -213,7 +306,7 @@ class Attention(nn.Module):
             self.pooling = nn.AvgPool2d(2, 2)
 
 
-        self.se = att_module
+        self.se = att_module_elm
 
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
@@ -250,13 +343,13 @@ class Attention(nn.Module):
         return x
 
 class FFN_3x3(nn.Module):
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-8, groups=1, att_module="SE", att_in="pre_post", activation="prelu"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate=0.1, gamma=1e-8, groups=1, att_module_ffn="SE", att_in_ffn="pre_post", activation="prelu"):
         super(FFN_3x3, self).__init__()
         self.inplanes = inplanes
         self.planes = planes
         self.stride = stride
-        self.att_module = att_module
-        self.att_in = att_in
+        self.att_module = att_module_ffn
+        self.att_in = att_in_ffn
 
         self.move = LearnableBias(inplanes)
         self.binary_activation = HardSign(range=[-1.5, 1.5])
@@ -277,7 +370,7 @@ class FFN_3x3(nn.Module):
 
         self.downsample = downsample
 
-        self.se = att_module
+        self.se = att_module_ffn
 
         self.scale = nn.Parameter(torch.ones(1, planes, 1, 1) * 0.5)
 
@@ -306,7 +399,6 @@ class FFN_3x3(nn.Module):
 
         x = self.se(inp) * x
 
-        x = x * residual
         x = self.norm2(x)
         x = x + residual
 
@@ -316,14 +408,14 @@ class FFN_3x3(nn.Module):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate = 0.1, mode = "scale", att_module="SE", att_in="pre_post", activation="prelu"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, drop_rate = 0.1, mode = "scale", att_module_elm="SE", att_in_elm="pre_post", att_module_ffn=None, att_in_ffn=None, activation="prelu"):
         super(BasicBlock, self).__init__()
         self.inplanes = inplanes
         self.planes = planes
         
-        self.Attention = Attention(inplanes, planes, stride, downsample, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in, activation=activation)
+        self.Attention = Attention(inplanes, planes, stride, downsample, drop_rate = drop_rate, groups = 1, att_module_elm=att_module_elm, att_in_elm=att_in_elm, activation=activation)
          
-        self.FFN  = FFN_3x3(planes, planes, 1, None, drop_rate = drop_rate, groups = 1, att_module=att_module, att_in=att_in, activation=activation)
+        self.FFN  = FFN_3x3(planes, planes, 1, None, drop_rate = drop_rate, groups = 1, att_module_ffn=att_module_ffn, att_in_ffn=att_in_ffn, activation=activation)
           
     def forward(self, input):
         x = self.Attention(input)
@@ -341,7 +433,8 @@ class ModelSpace(nn.Module):
         self.num_blocks_per_layer = [2] * self.num_layers
         self.inplanes = nn.ModelParameterChoice([16, 32, 64], label="inplanes")
 
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+        # self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = QuantizeConv(3, self.inplanes, 3, 1, 1, 1, 1, False, activation_bits = 8, weight_bits = 8) 
         self.bn1 = nn.BatchNorm2d(self.inplanes)
         self.maxpool = lambda x:x
 
@@ -353,21 +446,28 @@ class ModelSpace(nn.Module):
 
         for i in range(self.num_layers):
             if i == 0:
-                self.layers.append(self._make_layer(block, int(width*width_multiplier[i]), self.num_blocks_per_layer[i], att_module=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid"),
-                EfficientChannelAttention(int(width*width_multiplier[i]))], label=f"att_{i}"), att_in=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_{i}"), activation=activation))
+                self.layers.append(self._make_layer(block, int(width*width_multiplier[i]), self.num_blocks_per_layer[i], att_module_elm_1=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_elm_1_{i}"), att_in_elm_1=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_elm_1_{i}"),att_module_ffn_1=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_ffn_1_{i}"), att_in_ffn_1=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_ffn_1_{i}"), att_module_elm_2=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_elm_2_{i}"), att_in_elm_2=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_elm_2_{i}"),att_module_ffn_2=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_ffn_2_{i}"), att_in_ffn_2=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_ffn_2_{i}"),activation=activation))
             else:
-                self.layers.append(self._make_layer(block, int(width*width_multiplier[i]), self.num_blocks_per_layer[i], stride=2, att_module=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid"),
-                EfficientChannelAttention(int(width*width_multiplier[i]))], label=f"att_{i}"), att_in=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_{i}"), activation=activation))
-    
+                self.layers.append(self._make_layer(block, int(width*width_multiplier[i]), self.num_blocks_per_layer[i], stride=2, att_module_elm_1=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_elm_1_{i}"), att_in_elm_1=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_elm_1_{i}"),att_module_ffn_1=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_ffn_1_{i}"), att_in_ffn_1=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_ffn_1_{i}"), att_module_elm_2=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_elm_2_{i}"), att_in_elm_2=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_elm_2_{i}"),att_module_ffn_2=nn.LayerChoice([SqueezeAndExpand(int(width*width_multiplier[i]), int(width*width_multiplier[i]), attention_mode="sigmoid")
+                ,EfficientChannelAttention(int(width*width_multiplier[i])),GSoPAttention(int(width*width_multiplier[i]))], label=f"att_ffn_2_{i}"), att_in_ffn_2=nn.ModelParameterChoice(["pre", "post", "pre_post"], label=f"att_in_ffn_2_{i}"), activation=activation))
+      
         if activation == "prelu":
             self.prelu = nn.PReLU(width_multiplier[-1])
         elif activation == "gelu":
             self.prelu = nn.GELU()
         self.pool1 = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(width_multiplier[-1], num_classes)
+        # self.fc = nn.Linear(width_multiplier[-1], num_classes)
+        self.fc = QuantizeLinear(width_multiplier[-1], num_classes, activation_bits = 8, weight_bits = 8)
     
 
-    def _make_layer(self, block, planes, blocks, stride=1, att_module=None, att_in="pre_post", activation="prelu"):
+    def _make_layer(self, block, planes, blocks, stride=1, att_module_elm_1=None, att_module_ffn_1=None, att_in_elm_1="pre_post", att_in_ffn_1="pre_post", att_module_elm_2=None, att_module_ffn_2=None, att_in_elm_2="pre_post", att_in_ffn_2="pre_post", activation="prelu"):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -376,10 +476,10 @@ class ModelSpace(nn.Module):
                                 nn.BatchNorm2d(planes * block.expansion))
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, drop_rate = 0, att_module=att_module, att_in=att_in, activation=activation))
+        layers.append(block(self.inplanes, planes, stride, downsample, drop_rate = 0, att_module_elm=att_module_elm_1, att_module_ffn=att_module_ffn_1, att_in_elm=att_in_elm_1, att_in_ffn=att_in_ffn_1, activation=activation))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes, drop_rate = 0, att_module=att_module, att_in=att_in, activation=activation))
+            layers.append(block(self.inplanes, planes, drop_rate = 0, att_module_elm=att_module_elm_2, att_module_ffn=att_module_ffn_2, att_in_elm=att_in_elm_2, att_in_ffn=att_in_ffn_2, activation=activation))
 
         return nn.Sequential(*layers)
 
@@ -548,15 +648,27 @@ def evaluate_model(model_cls):
     temperature = 1.0
     training_temperature.append(temperature)
 
-    params, footprint, macs = compute_params_ROM_MACs(model)
+    best_top1_acc = 0
+
+    params, footprint, macs = compute_params_ROM_MACs(model, ptq=8)
 
     for epoch in range(CONFIG["epochs"]):
         # train the model for one epoch
         train_epoch(model, device, train_loader, criterion, scheduler, optimizer, epoch)
         # test the model for one epoch
         accuracy = test_epoch(model, device, criterion, val_loader)
+
+        is_best = False
+        if accuracy > best_top1_acc:
+            best_top1_acc = accuracy
+            is_best = True
+
+
+        
         temperature = adjust_temperature(model, epoch).item()
         training_temperature.append(temperature)
+        print("Best Acc: {}%, Temp: {}".format(best_top1_acc, temperature))
+        
         # call report intermediate result. Result can be float or dict
         nni.report_intermediate_result({"accuracy": accuracy})
 
