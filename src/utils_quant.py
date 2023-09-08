@@ -246,6 +246,51 @@ class QuantizeConv(nn.Conv2d):
         return out
 
 
+class QuantizeConv1D(nn.Conv1d):
+    def __init__(self, *args, activation_bits=8, weight_bits=8, clip_val=1000.0):
+        super(QuantizeConv1D, self).__init__(*args)
+        self.activation_bits = activation_bits
+        self.activation_quantizer = AsymQuantizer if self.activation_bits != 1 else BinaryQuantizer
+
+        self.weight_bits = weight_bits
+        self.weight_quantizer = AsymQuantizer if self.weight_bits != 1 else BinaryQuantizer
+
+        self.register_buffer("weight_clip_val", torch.tensor([-clip_val, clip_val]))
+        self.register_buffer("activation_clip_val", torch.tensor([-clip_val, clip_val]))
+
+    def forward(self, input):
+        if self.weight_bits != 1:
+            scaling_factor = 2 * torch.mean(torch.mean(torch.abs(self.weight), dim=2, keepdim=True), dim=1, keepdim=True).detach()
+
+            weight = self.weight / scaling_factor
+
+            weight = self.weight_quantizer.apply(weight, self.weight_clip_val, self.weight_bits, False)
+
+            weight = weight * scaling_factor
+
+        else:
+            scaling_factor = torch.mean(torch.abs(self.weight), dim=1, keepdim=True).detach()
+            weight = self.weight_quantizer.apply(self.weight) * scaling_factor
+
+        if not ((self.in_channels == 3 and self.activation_bits == 8) or self.activation_bits == 32):
+            size = input.size()
+            if size[-1] == 1:
+                activation = input.squeeze(-1)
+            else:
+                activation = input
+            activation = self.activation_quantizer.apply(activation, self.activation_clip_val, self.activation_bits, False)
+
+            if size[-1] == 1:
+                activation = activation.unsqueeze(-1)
+        else:
+            activation = input
+
+        out = nn.functional.conv1d(activation, weight, stride=self.stride, padding=self.padding, groups=self.groups,
+                                   bias=self.bias)
+
+        return out
+
+
 class QuantizeLinear(nn.Linear):
     def __init__(self, *kargs, bias=True, activation_bits=8, weight_bits=8):
         super(QuantizeLinear, self).__init__(*kargs, bias=True)

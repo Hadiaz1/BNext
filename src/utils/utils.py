@@ -246,7 +246,7 @@ def compute_params_ROM_MACs(model, ptq=None):
         params = parameter.numel()
         if "binary" in name:
             memory = params/(8*1024)
-        elif ("conv1.weight" in name) or ("att_module" and ("gsop_conv" or "gsop_fc")) or  ("att_module" and "se" and "weight" in name) or ("fc.weight" in name):
+        elif ("conv1.weight" in name) or ("att_module" and "eca_conv") or ("att_module" and ("gsop_conv" or "gsop_fc")) or  ("att_module" and "se" and "weight" in name) or ("fc.weight" in name):
             if ptq:
                 memory = (params * ptq) / (8 * 1024)
             else:

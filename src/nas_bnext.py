@@ -225,18 +225,21 @@ class SqueezeAndExpand(nn.Module):
         return x
 
 class EfficientChannelAttention(nn.Module):
-    def __init__(self, channels, gamma=2, b=1):
+    def __init__(self, channels, gamma=2, b=1, quant=True, bits=8):
         super(EfficientChannelAttention, self).__init__()
         self.t = int(abs((math.log(channels, 2) + b) / gamma))
         self.k = self.t if self.t % 2 else self.t + 1
 
         self.avg_pool = nn.AdaptiveAvgPool2d((1,1))
-        self.conv = nn.Conv1d(1, 1, kernel_size=self.k, padding=int(self.k/2), bias=False)
+        if not quant:
+            self.eca_conv = nn.Conv1d(1, 1, kernel_size=self.k, padding=int(self.k/2), bias=False)
+        else:
+            self.eca_conv = QuantizeConv1D(1, 1, self.k, 1, int(self.k/2), 1, 1, False, activation_bits=bits, weight_bits=bits)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         x = self.avg_pool(x)
-        x = self.conv(x.squeeze(-1).transpose(-1, -2))
+        x = self.eca_conv(x.squeeze(-1).transpose(-1, -2))
         x = x.transpose(-1, -2).unsqueeze(-1)
         x = self.sigmoid(x)
         return x
@@ -439,8 +442,8 @@ class ModelSpace(nn.Module):
         self.num_blocks_per_layer = [2] * self.num_layers
         self.inplanes = nn.ModelParameterChoice([16, 32, 64], label="inplanes")
 
-        # self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.conv1 = QuantizeConv(3, self.inplanes, 3, 1, 1, 1, 1, False, activation_bits = 8, weight_bits = 8) 
+        # nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv1 = QuantizeConv(3, self.inplanes, 3, 1, 1, 1, 1, False, activation_bits = 8, weight_bits = 8)
         self.bn1 = nn.BatchNorm2d(self.inplanes)
         self.maxpool = lambda x:x
 
@@ -469,7 +472,7 @@ class ModelSpace(nn.Module):
         elif activation == "gelu":
             self.prelu = nn.GELU()
         self.pool1 = nn.AdaptiveAvgPool2d(1)
-        # self.fc = nn.Linear(width_multiplier[-1], num_classes)
+        # nn.Linear(width_multiplier[-1], num_classes)
         self.fc = QuantizeLinear(width_multiplier[-1], num_classes, activation_bits = 8, weight_bits = 8)
     
 
@@ -669,8 +672,6 @@ def evaluate_model(model_cls):
             best_top1_acc = accuracy
             is_best = True
 
-
-        
         temperature = adjust_temperature(model, epoch).item()
         training_temperature.append(temperature)
         print("Best Acc: {}%, Temp: {}".format(best_top1_acc, temperature))
