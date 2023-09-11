@@ -33,7 +33,6 @@ with open("params.yaml", "r") as f:
  
 def adjust_temperature(model, epoch):
     temperature = torch.ones(1)
-    from birealnet import HardSign, HardBinaryConv
     for module in model.modules():
         if isinstance(module, (HardSign, HardBinaryConv)):
             if (epoch % 1)==0 and (epoch != 0):
